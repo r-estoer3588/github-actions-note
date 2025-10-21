@@ -66,44 +66,87 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install Claude Agent SDK
+      - name: Install Claude Agent SDK (clean install)
         run: |
           npm init -y
+          # Ensure any deprecated package is removed before installing the Agent SDK
+          npm uninstall @anthropic-ai/claude-code || true
+          rm -rf node_modules package-lock.json || true
           npm i @anthropic-ai/claude-agent-sdk
 
       - name: Research with Claude Agent SDK
         run: |
           cat > research.mjs <<'EOF'
-          import { query } from '@anthropic-ai/claude-agent-sdk';
           import fs from 'fs';
           const theme = process.env.THEME || '';
           const target = process.env.TARGET || '';
           const today = new Date().toISOString().slice(0,10);
           const artifactsDir = '.note-artifacts';
           fs.mkdirSync(artifactsDir, { recursive: true });
+
           const sys = [
             'あなたは最新情報の収集と要約に特化した超一流のリサーチャーです。',
             '事実ベース・一次情報優先・本文内にMarkdownリンクで出典を埋め込むこと。',
             '十分な分量（目安: 2,000語以上）。各節で出典を本文に埋めること。',
             'WebSearch と WebFetch を必ず使用し、一次情報（公的機関・規格・論文・公式）を優先する。',
           ].join('\n');
+
           const userPrompt = `以下のテーマとターゲットに対する最終版のリサーチレポートを作成してください。\n【重要】途中経過や確認質問は一切せず、最終レポートのみを返してください。不明点がある場合は「前提と仮定」セクションで簡潔に仮定を明記してから続行してください。事実ベースで一次情報を最優先し、本文にMarkdownリンクで出典を埋め込んでください。\n---\nテーマ: ${theme}\nターゲット: ${target}\n現在日付: ${today}`;
-          const messages = [];
-          for await (const msg of query({
-            prompt: userPrompt,
-            options: {
-              // Claude Agent SDK: use `systemPrompt` (string or preset) instead of the
-              // legacy default system behavior. This ensures consistent CI behavior.
-              systemPrompt: sys,
-              allowedTools: ['WebSearch','WebFetch'],
-              permissionMode: 'acceptEdits',
-            },
-          })) { messages.push(msg); }
-          const assistantTexts = messages.filter(m => m.type === 'assistant').map(m => {
-            const c = m.message?.content; if (Array.isArray(c)) { return c.filter(b => b?.type === 'text').map(b => b.text).join('\n'); } return '';
-          }).filter(Boolean).join('\n\n');
-          fs.writeFileSync(`${artifactsDir}/research.md`, assistantTexts || '');
-          try { fs.writeFileSync(`${artifactsDir}/research_trace.json`, JSON.stringify(messages, null, 2)); } catch {}
+
+          async function loadQuery() {
+            try {
+              const mod = await import('@anthropic-ai/claude-agent-sdk');
+              if (mod && typeof mod.query === 'function') {
+                console.log('Loaded @anthropic-ai/claude-agent-sdk');
+                return mod.query;
+              }
+              if (mod && mod.default && typeof mod.default.query === 'function') {
+                console.log('Loaded @anthropic-ai/claude-agent-sdk (default export)');
+                return mod.default.query;
+              }
+              throw new Error('Unexpected module shape for @anthropic-ai/claude-agent-sdk');
+
+            } catch (err) {
+              console.error('Could not import @anthropic-ai/claude-agent-sdk:', err && err.message ? err.message : err);
+              try {
+                // If deprecated package is present, surface a clear error
+                const old = await import('@anthropic-ai/claude-code');
+                console.error('Detected deprecated @anthropic-ai/claude-code installed. Please uninstall it and use @anthropic-ai/claude-agent-sdk.');
+                throw new Error('@anthropic-ai/claude-code detected (deprecated)');
+              } catch (err2) {
+                // Neither package available
+                throw err;
+              }
+            }
+          }
+
+          (async () => {
+            try {
+              const query = await loadQuery();
+              const messages = [];
+              for await (const msg of query({
+                prompt: userPrompt,
+                options: {
+                  systemPrompt: sys,
+                  allowedTools: ['WebSearch','WebFetch'],
+                  permissionMode: 'acceptEdits',
+                },
+              })) {
+                messages.push(msg);
+              }
+
+              const assistantTexts = messages.filter(m => m.type === 'assistant').map(m => {
+                const c = m.message?.content; if (Array.isArray(c)) { return c.filter(b => b?.type === 'text').map(b => b.text).join('\n'); } return '';
+              }).filter(Boolean).join('\n\n');
+
+              fs.writeFileSync(`${artifactsDir}/research.md`, assistantTexts || '');
+              try { fs.writeFileSync(`${artifactsDir}/research_trace.json`, JSON.stringify(messages, null, 2)); } catch (e) { console.warn('trace write failed', e && e.message ? e.message : e); }
+              console.log('Research complete. Wrote:', `${artifactsDir}/research.md`);
+            } catch (err) {
+              console.error('Research step failed:', err && err.message ? err.message : err);
+              process.exit(1);
+            }
+          })();
           EOF
           node research.mjs
 
