@@ -74,13 +74,17 @@ jobs:
         with:
           node-version: "20"
 
-      - name: Install research dependencies (AI + web)
+      - name: Install research dependencies (AI + web + Agent SDK)
         run: |
           npm init -y
-          # Install the Anthropic AI client and a small HTML parser for scraping fallbacks
-          npm i ai @ai-sdk/anthropic cheerio
+          # Install the Agent SDK (for tool usage) plus fallback AI client and HTML parser
+          npm i @anthropic-ai/claude-agent-sdk ai @ai-sdk/anthropic cheerio --no-audit --no-fund
           # Debug: list installed Anthropic-related packages to verify state
           npm ls @anthropic-ai/claude-agent-sdk @anthropic-ai/claude-code ai @ai-sdk/anthropic --depth=0 || true
+
+      - name: Verify Agent SDK import (non-fatal)
+        run: |
+          node -e "import('@anthropic-ai/claude-agent-sdk').then(m=>console.log('AGENT_SDK_OK', Object.keys(m))).catch(e=>console.error('AGENT_SDK_IMPORT_FAIL', e && e.message ? e.message : e))" || true
 
       - name: Research with Claude Agent SDK
         run: |
@@ -116,13 +120,31 @@ jobs:
 
             } catch (err) {
               console.error('Could not import @anthropic-ai/claude-agent-sdk:', err && err.message ? err.message : err);
+              // Fallback: use cloud AI client (ai + @ai-sdk/anthropic) as a non-streaming async-generator wrapper
               try {
-                // If deprecated package is present, surface a clear error
-                const old = await import('@anthropic-ai/claude-code');
-                console.error('Detected deprecated @anthropic-ai/claude-code installed. Please uninstall it and use @anthropic-ai/claude-agent-sdk.');
-                throw new Error('@anthropic-ai/claude-code detected (deprecated)');
+                const { generateText } = await import('ai');
+                const { anthropic } = await import('@ai-sdk/anthropic');
+                const modelClient = anthropic('claude-sonnet-4-5-20250929');
+                console.warn('Falling back to ai+anthropic generateText (non-streaming).');
+                return async function* fallbackQuery({ prompt, options = {} }) {
+                  // Flatten prompt if it's an async iterable
+                  let promptStr = '';
+                  if (typeof prompt === 'string') promptStr = prompt;
+                  else if (prompt && typeof prompt[Symbol.asyncIterator] === 'function') {
+                    for await (const p of prompt) {
+                      try {
+                        if (p && p.message && Array.isArray(p.message.content)) {
+                          promptStr += p.message.content.map(c => c.text || '').join('');
+                        } else if (typeof p === 'string') promptStr += p;
+                      } catch {}
+                    }
+                  }
+                  const sysOpt = options && options.systemPrompt ? options.systemPrompt : '';
+                  const { text } = await generateText({ model: modelClient, system: sysOpt, prompt: promptStr, temperature: 0.25, maxTokens: 8000 });
+                  yield { type: 'assistant', message: { content: [{ type: 'text', text }] } };
+                };
               } catch (err2) {
-                // Neither package available
+                console.error('Fallback import failed:', err2 && err2.message ? err2.message : err2);
                 throw err;
               }
             }
