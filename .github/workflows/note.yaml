@@ -127,9 +127,15 @@ jobs:
               for await (const msg of query({
                 prompt: userPrompt,
                 options: {
+                  // Avoid launching the legacy CLI by specifying the model
+                  model: 'claude-sonnet-4-5-20250929',
+                  // Do not load any filesystem settings in CI
+                  settingSources: [],
                   systemPrompt: sys,
                   allowedTools: ['WebSearch','WebFetch'],
                   permissionMode: 'acceptEdits',
+                  // Capture SDK stderr to help debug if underlying processes fail
+                  stderr: (line) => console.error('[agent-sdk-stderr]', line),
                 },
               })) {
                 messages.push(msg);
